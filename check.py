@@ -5,15 +5,19 @@ TOKEN = os.environ["TG_TOKEN"]
 CHAT_ID = os.environ["TG_CHAT_ID"]
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
 URL = "https://broneering.mfa.ee/en/"
-AVAILABLE_SELECTOR = ".day.available"   # UPDATE THIS: Replace with your actual calendar selector
 
 def notify(msg):
     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                  data={"chat_id": CHAT_ID, "text": msg}, timeout=30)
+                  data={"chat_id": CHAT_ID, "text": msg[:4000]}, timeout=30)
 
-# Send the test message FIRST, so we know Telegram works
-if TEST_MODE:
-    notify("TEST: Telegram works. Now trying to open the website...")
+def describe_selects(page):
+    out = []
+    selects = page.locator("select")
+    for i in range(selects.count()):
+        s = selects.nth(i)
+        opts = [o.strip() for o in s.locator("option").all_inner_texts()]
+        out.append(f"select #{i} id={s.get_attribute('id')} name={s.get_attribute('name')} options={opts}")
+    return "\n".join(out) or "No <select> elements found on the page"
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -23,27 +27,30 @@ with sync_playwright() as p:
         page.wait_for_timeout(5000)
     except Exception as e:
         print("Page load failed:", e)
-        if TEST_MODE:
-            notify("TEST: website did NOT load from GitHub (likely blocked or too slow).")
         browser.close()
         raise SystemExit(1)
 
-    if TEST_MODE:
-        notify("TEST: website loaded OK. Page title: " + page.title())
+    if not TEST_MODE:
+        print("Discovery mode: nothing to do on scheduled runs.")
+        browser.close()
+        raise SystemExit(0)
 
-    # --- Step 6: Navigation to New Delhi calendar ---
-    try:
-        # Update these selectors based on the actual layout of broneering.mfa.ee
-        page.click("text=New Delhi")
-        page.wait_for_load_state("networkidle")
-    except Exception as nav_err:
-        print("Navigation to New Delhi failed:", nav_err)
+    before = describe_selects(page)
 
-    # Count available slots matching the selector
-    count = page.locator(AVAILABLE_SELECTOR).count()
-    print("Available slots found:", count)
+    chosen = None
+    selects = page.locator("select")
+    for i in range(selects.count()):
+        for opt in selects.nth(i).locator("option").all_inner_texts():
+            if "new delhi" in opt.lower():
+                selects.nth(i).select_option(label=opt.strip())
+                chosen = opt.strip()
+                break
+        if chosen:
+            break
 
-    if not TEST_MODE and count > 0:
-        notify("Estonia visa slot AVAILABLE! Book now: " + URL)
-        
+    page.wait_for_timeout(4000)
+    after = describe_selects(page)
+
+    notify("BEFORE selecting:\n" + before)
+    notify("Selected: " + str(chosen) + "\n\nAFTER selecting:\n" + after)
     browser.close()
