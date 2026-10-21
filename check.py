@@ -1,8 +1,8 @@
 import os, requests
 from playwright.sync_api import sync_playwright
 
-TOKEN = os.environ["TG_TOKEN"]
-CHAT_ID = os.environ["TG_CHAT_ID"]
+TOKEN = os.environ["8620021180:AAH07zzPyAGijpEZHu5U8OdFOlTXEHYwTkU"]
+CHAT_ID = os.environ["5487109990"]
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
 URL = "https://broneering.mfa.ee/en/"
 AVAILABLE_SELECTOR = ".day.available"   # CHANGE THIS in Step 6
