@@ -47,7 +47,7 @@ with sync_playwright() as p:
             lines.append(f"{city}: {get_services(page, city)}")
         notify("CONTROL TEST\n" + "\n".join(lines))
     else:
-        services = get_services(page, "London")
+        services = get_services(page, "New Delhi")
         print("New Delhi services:", services)
         if services:
             notify("Estonia New Delhi: booking options appeared: "
