@@ -10,47 +10,47 @@ def notify(msg):
     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                   data={"chat_id": CHAT_ID, "text": msg[:4000]}, timeout=30)
 
-def describe_selects(page):
-    out = []
-    selects = page.locator("select")
-    for i in range(selects.count()):
-        s = selects.nth(i)
-        opts = [o.strip() for o in s.locator("option").all_inner_texts()]
-        out.append(f"select #{i} id={s.get_attribute('id')} name={s.get_attribute('name')} options={opts}")
-    return "\n".join(out) or "No <select> elements found on the page"
+def get_services(page, city):
+    """Select an embassy containing `city`, return the list of real service options."""
+    sel = page.locator("#broneering_esindus")
+    label = None
+    for opt in sel.locator("option").all_inner_texts():
+        if city.lower() in opt.lower():
+            label = opt.strip()
+            break
+    if label is None:
+        return None
+    sel.select_option(label=label)
+    services = []
+    for _ in range(10):                      # wait up to ~10 seconds for the list to fill
+        page.wait_for_timeout(1000)
+        opts = [o.strip() for o in page.locator("#broneering_toiming option").all_inner_texts()]
+        services = [o for o in opts if o]
+        if services:
+            break
+    return services
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     page = browser.new_page()
     try:
         page.goto(URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(5000)
+        page.wait_for_selector("#broneering_esindus", timeout=20000)
     except Exception as e:
         print("Page load failed:", e)
         browser.close()
         raise SystemExit(1)
 
-    if not TEST_MODE:
-        print("Discovery mode: nothing to do on scheduled runs.")
-        browser.close()
-        raise SystemExit(0)
+    if TEST_MODE:
+        lines = []
+        for city in ["New Delhi", "London", "Berlin", "Stockholm"]:
+            lines.append(f"{city}: {get_services(page, city)}")
+        notify("CONTROL TEST\n" + "\n".join(lines))
+    else:
+        services = get_services(page, "New Delhi")
+        print("New Delhi services:", services)
+        if services:
+            notify("Estonia New Delhi: booking options appeared: "
+                   + ", ".join(services) + "\nBook now: " + URL)
 
-    before = describe_selects(page)
-
-    chosen = None
-    selects = page.locator("select")
-    for i in range(selects.count()):
-        for opt in selects.nth(i).locator("option").all_inner_texts():
-            if "new delhi" in opt.lower():
-                selects.nth(i).select_option(label=opt.strip())
-                chosen = opt.strip()
-                break
-        if chosen:
-            break
-
-    page.wait_for_timeout(4000)
-    after = describe_selects(page)
-
-    notify("BEFORE selecting:\n" + before)
-    notify("Selected: " + str(chosen) + "\n\nAFTER selecting:\n" + after)
     browser.close()
