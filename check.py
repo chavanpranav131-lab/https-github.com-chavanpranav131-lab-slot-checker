@@ -47,11 +47,27 @@ if TEST_MODE:
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     page = browser.new_page()
-    try:
-        page.goto(URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_selector("#broneering_esindus", timeout=20000)
-    except Exception as e:
-        print("Page load failed:", e)
+    
+      loaded = False
+    for attempt in range(3):
+        try:
+            page.goto(URL, wait_until="domcontentloaded", timeout=40000)
+            page.wait_for_selector("#broneering_esindus", timeout=30000)
+            loaded = True
+            break
+        except Exception as e:
+            print(f"Attempt {attempt+1} failed:", e)
+            page.wait_for_timeout(5000)
+    if not loaded:
+        try:
+            body = page.inner_text("body")[:500].replace("\n", " ")
+        except Exception:
+            body = "(could not read page)"
+        print("PAGE TITLE:", page.title())
+        print("PAGE URL:", page.url)
+        print("PAGE TEXT:", body)
+        if TEST_MODE:
+            notify(f"TEST: site did not load. Title: {page.title()} | Text: {body}")
         browser.close()
         raise SystemExit(1)
 
