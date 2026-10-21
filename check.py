@@ -2,16 +2,27 @@ import os, requests
 from playwright.sync_api import sync_playwright
 
 TOKEN = os.environ["TG_TOKEN"]
-CHAT_ID = os.environ["TG_CHAT_ID"]
+CHAT_IDS = [c.strip() for c in os.environ["TG_CHAT_ID"].split(",") if c.strip()]
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
 URL = "https://broneering.mfa.ee/en/"
+telegram_failed = False
 
 def notify(msg):
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                  data={"chat_id": CHAT_ID, "text": msg[:4000]}, timeout=30)
+    global telegram_failed
+    for cid in CHAT_IDS:
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                              data={"chat_id": cid, "text": msg[:4000]}, timeout=30)
+            if r.status_code == 200:
+                print("Telegram: message sent OK")
+            else:
+                print("Telegram REJECTED the message:", r.json().get("description"))
+                telegram_failed = True
+        except Exception as e:
+            print("Telegram error:", e)
+            telegram_failed = True
 
 def get_services(page, city):
-    """Select an embassy containing `city`, return the list of real service options."""
     sel = page.locator("#broneering_esindus")
     label = None
     for opt in sel.locator("option").all_inner_texts():
@@ -22,13 +33,16 @@ def get_services(page, city):
         return None
     sel.select_option(label=label)
     services = []
-    for _ in range(10):                      # wait up to ~10 seconds for the list to fill
+    for _ in range(10):
         page.wait_for_timeout(1000)
         opts = [o.strip() for o in page.locator("#broneering_toiming option").all_inner_texts()]
         services = [o for o in opts if o]
         if services:
             break
     return services
+
+if TEST_MODE:
+    notify("TEST: the bot can post here.")
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -41,16 +55,12 @@ with sync_playwright() as p:
         browser.close()
         raise SystemExit(1)
 
-    if TEST_MODE:
-        lines = []
-        for city in ["New Delhi", "London", "Berlin", "Stockholm"]:
-            lines.append(f"{city}: {get_services(page, city)}")
-        notify("CONTROL TEST\n" + "\n".join(lines))
-    else:
-        services = get_services(page, "London")
-        print("New Delhi services:", services)
-        if services:
-            notify("Estonia New Delhi: booking options appeared: "
-                   + ", ".join(services) + "\nBook now: " + URL)
-
+    services = get_services(page, "New Delhi")
+    print("New Delhi services:", services)
+    if services and not TEST_MODE:
+        notify("Estonia New Delhi: booking options appeared: "
+               + ", ".join(services) + "\nBook now: " + URL)
     browser.close()
+
+if telegram_failed:
+    raise SystemExit(1)
