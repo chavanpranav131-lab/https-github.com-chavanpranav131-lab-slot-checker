@@ -1,25 +1,56 @@
 name: check-slots
+
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"          # GitHub's minimum; runs can be delayed a few minutes
   workflow_dispatch:
     inputs:
       test:
         description: "Send test message (1 = yes)"
         default: "0"
+
+concurrency:
+  group: check-slots
+  cancel-in-progress: false         # never kill a run that is waiting for your CAPTCHA reply
+
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+
       - run: pip install playwright requests
       - run: playwright install --with-deps chromium
+
       - run: python check.py
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TEST_MODE: ${{ github.event.inputs.test }}
+          CITY: "New Delhi"
+          SERVICE_MATCH: "Long-stay"
+          AUTOFILL: ${{ secrets.AUTOFILL }}            # "1" to enable, anything else = alert only
+          CAPTCHA_WAIT_SECONDS: "200"
+          FIRST_NAME: ${{ secrets.FIRST_NAME }}
+          SURNAME: ${{ secrets.SURNAME }}
+          DOB: ${{ secrets.DOB }}
+          PHONE: ${{ secrets.PHONE }}
+          EMAIL: ${{ secrets.EMAIL }}
+          VISA_APP_NO: ${{ secrets.VISA_APP_NO }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 3
