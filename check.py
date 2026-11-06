@@ -92,26 +92,56 @@ def get_services(page, city):
 
 
 def fill_field(page, key, value):
-    """Precise field lookup based on exact UI labels seen in screenshots."""
-    pat = re.compile(key, re.I)
-    loc = page.get_by_label(pat)
+    """Extremely robust field lookup using multiple fallback strategies including positional indexing."""
+    key_lower = key.lower()
+    loc = page.locator("none")
     
-    # Fallbacks matching exact labels like "Insert your first name *"
-    if loc.count() == 0:
-        loc = page.get_by_label(re.compile(f"insert your.*{key}", re.I))
-    if loc.count() == 0:
-        loc = page.locator(
-            f"xpath=//label[contains(translate(normalize-space(.),"
-            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{key.lower()}')]"
-            f"/following::input[1]")
-            
+    # Strategy 1: Playwright get_by_label
+    try:
+        loc = page.get_by_label(re.compile(key, re.I), exact=False)
+        if loc.count() > 0:
+            loc = loc.first
+    except Exception:
+        pass
+
+    # Strategy 2: Match label containing the keyword via XPath
+    if loc.count() == 0 or not loc.is_visible():
+        xpath = f"//label[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{key_lower}')]/following::input[1]"
+        loc = page.locator(f"xpath={xpath}")
+
+    # Strategy 3: Match input name, id, or placeholder containing keyword parts
+    if loc.count() == 0 or not loc.is_visible():
+        parts = key_lower.split()
+        for part in parts:
+            if len(part) > 2:
+                loc = page.locator(f"input[name*='{part}' i], input[id*='{part}' i], input[placeholder*='{part}' i]")
+                if loc.count() > 0:
+                    loc = loc.first
+                    break
+
+    # Strategy 4: Positional fallback matching Page 2's exact order of 6 text inputs
+    if loc.count() == 0 or not loc.is_visible():
+        inputs = page.locator("input[type='text'], input[type='email'], input[type='tel'], input:not([type])")
+        mapping = {
+            "first name": 0,
+            "surname": 1,
+            "date of birth": 2,
+            "phone": 3,
+            "e-mail": 4,
+            "visa application number": 5
+        }
+        idx = mapping.get(key_lower, -1)
+        if idx >= 0 and inputs.count() > idx:
+            loc = inputs.nth(idx)
+
     if loc.count() == 0:
         raise RuntimeError(f"field not found: {key}")
-        
+
     el = loc.first
+    el.scroll_into_view_if_needed()
     el.click()
-    el.fill(value)
-    if "birth" in key:
+    el.fill(str(value))
+    if "birth" in key_lower:
         page.keyboard.press("Escape")
 
 
