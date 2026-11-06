@@ -17,6 +17,7 @@ TOKEN = os.environ["TG_TOKEN"]
 CHAT_IDS = [c.strip() for c in os.environ["TG_CHAT_ID"].split(",") if c.strip()]
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
 AUTOFILL = os.environ.get("AUTOFILL", "0") == "1"
+DRY_RUN = os.environ.get("DRY_RUN") == "1"     # rehearsal: fill everything, stop before final CAPTCHA
 CITY = os.environ.get("CITY", "New Delhi")
 SERVICE_MATCH = os.environ.get("SERVICE_MATCH", "Long-stay")
 CAPTCHA_WAIT = int(os.environ.get("CAPTCHA_WAIT_SECONDS", "200"))
@@ -84,7 +85,8 @@ def wait_for_reply(since_id, seconds):
                              timeout=30).json()
             for u in r.get("result", []):
                 offset = u["update_id"] + 1
-                m = u.get("message") or {}
+                # normal chats/groups -> "message"; channels (you post as admin) -> "channel_post"
+                m = u.get("message") or u.get("channel_post") or {}
                 if str(m.get("chat", {}).get("id")) in CHAT_IDS and m.get("text"):
                     return m["text"].strip()
         except Exception as e:
@@ -218,6 +220,7 @@ def autofill_flow(page, service_label):
         if not val:
             raise RuntimeError(f"missing env value for '{key}'")
         fill_field(page, key, val)
+    send_photo(page.screenshot(full_page=True), "Page 2 as filled by the script - check the details")
     click_next(page, "next page")
 
     # page 3 -> date, time, note, captcha, book
@@ -227,6 +230,10 @@ def autofill_flow(page, service_label):
     if note.count() == 0:
         note = page.locator("textarea")
     note.first.fill(NOTE_TEXT[:250])
+    send_photo(page.screenshot(full_page=True), "Page 3: date, time and note as chosen by the script")
+    if DRY_RUN:
+        notify("REHEARSAL OK: all steps worked. Stopped BEFORE the final CAPTCHA - nothing was booked.")
+        return True
     if not solve_captcha(page, "final booking"):
         return False
     snap(page, "before_submit")
@@ -302,6 +309,9 @@ def main():
                                         notify(f"Auto-fill error: {e}\nBook manually: {URL}")
                     else:
                         last_key = None          # slots gone -> next appearance alerts again
+                        if DRY_RUN:
+                            notify(f"REHEARSAL: no services open for {CITY} right now, "
+                                   "so there is nothing to test. Try again when slots show.")
             except Exception as e:
                 print("Check error:", e)
                 snap(page, "check_error")
