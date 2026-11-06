@@ -2,7 +2,7 @@ name: check-slots
 
 on:
   schedule:
-    - cron: "*/5 * * * *"          # GitHub's minimum; runs can be delayed a few minutes
+    - cron: "*/5 * * * *"          # backup restart only; GitHub may delay or skip these
   workflow_dispatch:
     inputs:
       test:
@@ -11,15 +11,16 @@ on:
 
 concurrency:
   group: check-slots
-  cancel-in-progress: false         # never kill a run that is waiting for your CAPTCHA reply
+  cancel-in-progress: false         # one run at a time; the next one waits in the queue
 
 permissions:
   contents: read
+  actions: write                    # lets a run start its successor
 
 jobs:
   check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355            # GitHub hard limit is 360
     steps:
       - uses: actions/checkout@v4
 
@@ -31,15 +32,19 @@ jobs:
       - run: pip install playwright requests
       - run: playwright install --with-deps chromium
 
-      - run: python check.py
+      - name: Monitor loop
+        run: python check.py
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TEST_MODE: ${{ github.event.inputs.test }}
           CITY: "New Delhi"
           SERVICE_MATCH: "Long-stay"
-          AUTOFILL: ${{ secrets.AUTOFILL }}            # "1" to enable, anything else = alert only
+          AUTOFILL: ${{ secrets.AUTOFILL }}
           CAPTCHA_WAIT_SECONDS: "200"
+          LOOP_SECONDS: "19800"        # 5.5 h of checking per run
+          INTERVAL_SECONDS: "60"       # one check per minute
+          REALERT_SECONDS: "900"
           FIRST_NAME: ${{ secrets.FIRST_NAME }}
           SURNAME: ${{ secrets.SURNAME }}
           DOB: ${{ secrets.DOB }}
@@ -54,3 +59,11 @@ jobs:
           path: debug/
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Start next run (self-chain)
+        if: always() && github.event.inputs.test != '1' && hashFiles('debug/booked.flag') == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 20
+          gh workflow run check.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
