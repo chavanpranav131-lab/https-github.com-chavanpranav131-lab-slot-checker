@@ -79,6 +79,7 @@ def wait_for_reply(since_id, seconds):
     """Poll Telegram for a text reply from an allowed chat. Returns str or None."""
     deadline = time.time() + seconds
     offset = since_id + 1
+    warned = set()
     while time.time() < deadline:
         try:
             r = requests.get(f"{API}/getUpdates", params={"offset": offset, "timeout": 0},
@@ -87,8 +88,21 @@ def wait_for_reply(since_id, seconds):
                 offset = u["update_id"] + 1
                 # normal chats/groups -> "message"; channels (you post as admin) -> "channel_post"
                 m = u.get("message") or u.get("channel_post") or {}
-                if str(m.get("chat", {}).get("id")) in CHAT_IDS and m.get("text"):
+                chat_id = str(m.get("chat", {}).get("id"))
+                if chat_id in CHAT_IDS and m.get("text"):
                     return m["text"].strip()
+                if m.get("text") and chat_id not in warned:
+                    warned.add(chat_id)
+                    print(f"Ignored reply from chat {chat_id} (not in TG_CHAT_ID)")
+                    try:
+                        requests.post(f"{API}/sendMessage", data={
+                            "chat_id": chat_id,
+                            "text": f"I ignored your reply: this chat (id {chat_id}) is not in "
+                                    "TG_CHAT_ID. Reply in the alerts channel instead, or add "
+                                    "this id to the TG_CHAT_ID secret (comma-separated)."},
+                            timeout=30)
+                    except Exception:
+                        pass
         except Exception as e:
             print("getUpdates error:", e)
         time.sleep(3)
