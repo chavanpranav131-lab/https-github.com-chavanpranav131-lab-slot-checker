@@ -75,6 +75,26 @@ def last_update_id():
         return 0
 
 
+_allowed_cache = None
+
+
+def allowed_ids():
+    """CHAT_IDS may hold numeric ids or @usernames; replies always carry numeric ids."""
+    global _allowed_cache
+    if _allowed_cache is None:
+        ids = set(CHAT_IDS)
+        for cid in CHAT_IDS:
+            if not cid.lstrip("-").isdigit():
+                try:
+                    r = requests.get(f"{API}/getChat", params={"chat_id": cid}, timeout=30).json()
+                    if r.get("ok"):
+                        ids.add(str(r["result"]["id"]))
+                except Exception as e:
+                    print("getChat failed for", cid, e)
+        _allowed_cache = ids
+    return _allowed_cache
+
+
 def wait_for_reply(since_id, seconds):
     """Poll Telegram for a text reply from an allowed chat. Returns str or None."""
     deadline = time.time() + seconds
@@ -89,7 +109,7 @@ def wait_for_reply(since_id, seconds):
                 # normal chats/groups -> "message"; channels (you post as admin) -> "channel_post"
                 m = u.get("message") or u.get("channel_post") or {}
                 chat_id = str(m.get("chat", {}).get("id"))
-                if chat_id in CHAT_IDS and m.get("text"):
+                if chat_id in allowed_ids() and m.get("text"):
                     return m["text"].strip()
                 if m.get("text") and chat_id not in warned:
                     warned.add(chat_id)
