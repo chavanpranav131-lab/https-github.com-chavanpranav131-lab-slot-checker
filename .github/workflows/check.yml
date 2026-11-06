@@ -38,9 +38,9 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TEST_MODE: ${{ github.event.inputs.test }}
-          CITY: "New Delhi"
+          CITY: "Abu Dhabi"
           SERVICE_MATCH: "Long-stay"
-          AUTOFILL: ${{ secrets.AUTOFILL }}
+          AUTOFILL: "1"
           CAPTCHA_WAIT_SECONDS: "200"
           LOOP_SECONDS: "19800"        # 5.5 h of checking per run
           INTERVAL_SECONDS: "60"       # one check per minute
