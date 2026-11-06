@@ -1,15 +1,18 @@
 """
-Estonian MFA booking monitor  -  v2 (loop + self-chaining)
+Estonian MFA booking monitor - v3 (OCR Automated CAPTCHA)
 
 Flow
   1. Load https://broneering.mfa.ee/en/ and pick the representation (default: New Delhi).
-  2. If the service dropdown is populated -> slots exist -> Telegram alert (always).
+  2. If the service dropdown is populated -> slots exist -> Telegram alert.
   3. If AUTOFILL=1 -> select D-visa, pre-fill personal details, pick first free date/time,
-     and relay each image CAPTCHA to Telegram so YOU type the answer (human-in-the-loop).
+     solve CAPTCHAs automatically via local OCR (OpenCV + Tesseract), and complete booking.
 
 All personal data comes from environment variables / GitHub Secrets. Nothing is hard-coded.
 """
 import os, re, sys, time, requests
+import cv2
+import pytesseract
+from PIL import Image
 from playwright.sync_api import sync_playwright
 
 # ---------- config ----------
@@ -20,7 +23,6 @@ AUTOFILL = os.environ.get("AUTOFILL", "0") == "1"
 DRY_RUN = os.environ.get("DRY_RUN") == "1"     # rehearsal: fill everything, stop before final CAPTCHA
 CITY = os.environ.get("CITY", "New Delhi")
 SERVICE_MATCH = os.environ.get("SERVICE_MATCH", "Long-stay")
-CAPTCHA_WAIT = int(os.environ.get("CAPTCHA_WAIT_SECONDS", "200"))
 NOTE_TEXT = os.environ.get("NOTE_TEXT", "Long-stay visa (D-visa) application")
 LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "0"))        # 0 = single check
 INTERVAL = int(os.environ.get("INTERVAL_SECONDS", "60"))       # seconds between checks
@@ -64,69 +66,6 @@ def send_photo(data: bytes, caption: str):
                           files={"photo": ("img.png", data)}, timeout=60)
         except Exception as e:
             print("sendPhoto error:", e)
-
-
-def last_update_id():
-    try:
-        r = requests.get(f"{API}/getUpdates", params={"offset": -1}, timeout=30).json()
-        res = r.get("result", [])
-        return res[-1]["update_id"] if res else 0
-    except Exception:
-        return 0
-
-
-_allowed_cache = None
-
-
-def allowed_ids():
-    """CHAT_IDS may hold numeric ids or @usernames; replies always carry numeric ids."""
-    global _allowed_cache
-    if _allowed_cache is None:
-        ids = set(CHAT_IDS)
-        for cid in CHAT_IDS:
-            if not cid.lstrip("-").isdigit():
-                try:
-                    r = requests.get(f"{API}/getChat", params={"chat_id": cid}, timeout=30).json()
-                    if r.get("ok"):
-                        ids.add(str(r["result"]["id"]))
-                except Exception as e:
-                    print("getChat failed for", cid, e)
-        _allowed_cache = ids
-    return _allowed_cache
-
-
-def wait_for_reply(since_id, seconds):
-    """Poll Telegram for a text reply from an allowed chat. Returns str or None."""
-    deadline = time.time() + seconds
-    offset = since_id + 1
-    warned = set()
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"{API}/getUpdates", params={"offset": offset, "timeout": 0},
-                             timeout=30).json()
-            for u in r.get("result", []):
-                offset = u["update_id"] + 1
-                # normal chats/groups -> "message"; channels (you post as admin) -> "channel_post"
-                m = u.get("message") or u.get("channel_post") or {}
-                chat_id = str(m.get("chat", {}).get("id"))
-                if chat_id in allowed_ids() and m.get("text"):
-                    return m["text"].strip()
-                if m.get("text") and chat_id not in warned:
-                    warned.add(chat_id)
-                    print(f"Ignored reply from chat {chat_id} (not in TG_CHAT_ID)")
-                    try:
-                        requests.post(f"{API}/sendMessage", data={
-                            "chat_id": chat_id,
-                            "text": f"I ignored your reply: this chat (id {chat_id}) is not in "
-                                    "TG_CHAT_ID. Reply in the alerts channel instead, or add "
-                                    "this id to the TG_CHAT_ID secret (comma-separated)."},
-                            timeout=30)
-                    except Exception:
-                        pass
-        except Exception as e:
-            print("getUpdates error:", e)
-        time.sleep(3)
-    return None
 
 
 # ---------- page helpers ----------
@@ -175,7 +114,7 @@ def fill_field(page, key, value):
     el.click()
     el.fill(value)
     if "birth" in key:
-        page.keyboard.press("Escape")          # close datepicker popup
+        page.keyboard.press("Escape")           # close datepicker popup
 
 
 def captcha_input(page):
@@ -192,23 +131,43 @@ def captcha_image(page):
     return loc.first
 
 
-def solve_captcha(page, stage):
-    """Send CAPTCHA to Telegram, wait for the human's answer, type it in. 3 tries."""
+def solve_captcha_with_ocr(page, stage):
+    """Automatically capture CAPTCHA, clean noise via OpenCV, extract text via Tesseract, and fill it."""
     for attempt in range(3):
-        page.wait_for_timeout(800)
-        png = captcha_image(page).screenshot()
-        base = last_update_id()
-        send_photo(png, f"CAPTCHA ({stage}) - reply with the text. "
-                        f"Reply 'new' for a new image. Waiting {CAPTCHA_WAIT}s.")
-        ans = wait_for_reply(base, CAPTCHA_WAIT)
-        if ans is None:
-            notify(f"No CAPTCHA reply for '{stage}' - giving up this run.")
-            return False
-        if ans.lower() == "new":
-            page.get_by_role("button", name=re.compile("Uuenda|refresh|reload", re.I)).first.click()
-            continue
-        captcha_input(page).fill(ans)
-        return True
+        try:
+            page.wait_for_timeout(1000)
+            img_el = captcha_image(page)
+            captcha_path = f"{OUT}/captcha_{stage}.png"
+            img_el.screenshot(path=captcha_path)
+
+            # Preprocess image with OpenCV
+            img = cv2.imread(captcha_path)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # Thresholding to binarize text and eliminate background lines
+            _, thresh = cv2.threshold(gray, 140, 255, cv2.THRESH_BINARY_INV)
+            
+            processed_path = f"{OUT}/processed_{stage}.png"
+            cv2.imwrite(processed_path, thresh)
+
+            # Run Tesseract OCR (alphanumeric whitelist configuration)
+            custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz0123456789'
+            captcha_text = pytesseract.image_to_string(Image.open(processed_path), config=custom_config).strip()
+            
+            print(f"[{stage}] OCR Attempt {attempt + 1} detected text: '{captcha_text}'")
+
+            if len(captcha_text) >= 4:  # typical length check
+                captcha_input(page).fill(captcha_text)
+                return True
+            else:
+                # Refresh captcha if OCR output looks invalid/empty
+                refresh_btn = page.get_by_role("button", name=re.compile("Uuenda|refresh|reload", re.I))
+                if refresh_btn.count() > 0:
+                    refresh_btn.first.click()
+        except Exception as e:
+            print(f"OCR error on {stage}: {e}")
+            page.wait_for_timeout(1000)
+
+    notify(f"OCR failed to solve CAPTCHA for '{stage}' after 3 attempts.")
     return False
 
 
@@ -244,7 +203,7 @@ def autofill_flow(page, service_label):
     page.locator("#broneering_toiming").select_option(label=service_label)
 
     # page 1 -> captcha -> next
-    if not solve_captcha(page, "page 1"):
+    if not solve_captcha_with_ocr(page, "page1"):
         return False
     click_next(page, "next page")
 
@@ -254,7 +213,7 @@ def autofill_flow(page, service_label):
         if not val:
             raise RuntimeError(f"missing env value for '{key}'")
         fill_field(page, key, val)
-    send_photo(page.screenshot(full_page=True), "Page 2 as filled by the script - check the details")
+    send_photo(page.screenshot(full_page=True), "Page 2 as filled by script (OCR automated)")
     click_next(page, "next page")
 
     # page 3 -> date, time, note, captcha, book
@@ -264,17 +223,17 @@ def autofill_flow(page, service_label):
     if note.count() == 0:
         note = page.locator("textarea")
     note.first.fill(NOTE_TEXT[:250])
-    send_photo(page.screenshot(full_page=True), "Page 3: date, time and note as chosen by the script")
+    send_photo(page.screenshot(full_page=True), "Page 3: date, time and note chosen")
     if DRY_RUN:
-        notify("REHEARSAL OK: all steps worked. Stopped BEFORE the final CAPTCHA - nothing was booked.")
+        notify("REHEARSAL OK: all steps worked with OCR. Stopped BEFORE final CAPTCHA - nothing booked.")
         return True
-    if not solve_captcha(page, "final booking"):
+    if not solve_captcha_with_ocr(page, "final"):
         return False
     snap(page, "before_submit")
     click_next(page, "book the appointment")
     snap(page, "result")
     body = page.inner_text("body")[:600].replace("\n", " ")
-    notify(f"Booking submitted. Page says: {body}\nCheck your e-mail for the 'Booked' confirmation.")
+    notify(f"Booking submitted automatically via OCR! Page says: {body}\nCheck your e-mail.")
     return True
 
 
@@ -336,16 +295,14 @@ def main():
                                             booked = True
                                             open(f"{OUT}/booked.flag", "w").write("1")
                                         else:
-                                            notify("Auto-fill stopped (CAPTCHA not answered). "
-                                                   "Book manually.")
+                                            notify("Auto-fill stopped (OCR failed). Book manually.")
                                     except Exception as e:
                                         snap(page, "autofill_error")
                                         notify(f"Auto-fill error: {e}\nBook manually: {URL}")
                     else:
-                        last_key = None          # slots gone -> next appearance alerts again
+                        last_key = None         # slots gone -> next appearance alerts again
                         if DRY_RUN:
-                            notify(f"REHEARSAL: no services open for {CITY} right now, "
-                                   "so there is nothing to test. Try again when slots show.")
+                            notify(f"REHEARSAL: no services open for {CITY} right now.")
             except Exception as e:
                 print("Check error:", e)
                 snap(page, "check_error")
