@@ -6,8 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       test:
-        description: "Send test message (1 = yes)"
+        description: "Send test message only (1 = yes)"
         default: "0"
+      rehearsal:
+        description: "Rehearsal: fill everything, stop before final CAPTCHA, no booking (1 = yes)"
+        default: "0"
+      city:
+        description: "City to check (use Abu Dhabi for rehearsal)"
+        default: "New Delhi"
 
 concurrency:
   group: check-slots
@@ -33,17 +39,18 @@ jobs:
       - run: playwright install --with-deps chromium
 
       - name: Monitor loop
-        run: python check.py
+        run: python -u check.py        # -u = unbuffered, so log lines appear live
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TEST_MODE: ${{ github.event.inputs.test }}
-          CITY: "Abu Dhabi"
+          DRY_RUN: ${{ github.event.inputs.rehearsal }}
+          CITY: ${{ github.event.inputs.city || 'New Delhi' }}
           SERVICE_MATCH: "Long-stay"
-          AUTOFILL: "1"
+          AUTOFILL: ${{ github.event.inputs.rehearsal == '1' && '1' || secrets.AUTOFILL }}
           CAPTCHA_WAIT_SECONDS: "200"
-          LOOP_SECONDS: "19800"        # 5.5 h of checking per run
-          INTERVAL_SECONDS: "60"       # one check per minute
+          LOOP_SECONDS: ${{ github.event.inputs.rehearsal == '1' && '0' || '19800' }}
+          INTERVAL_SECONDS: "60"
           REALERT_SECONDS: "900"
           FIRST_NAME: ${{ secrets.FIRST_NAME }}
           SURNAME: ${{ secrets.SURNAME }}
@@ -61,7 +68,7 @@ jobs:
           retention-days: 3
 
       - name: Start next run (self-chain)
-        if: always() && github.event.inputs.test != '1' && hashFiles('debug/booked.flag') == ''
+        if: always() && github.event.inputs.test != '1' && github.event.inputs.rehearsal != '1' && hashFiles('debug/booked.flag') == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
