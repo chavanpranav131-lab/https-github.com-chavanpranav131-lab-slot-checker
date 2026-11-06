@@ -1,13 +1,5 @@
 """
-Estonian MFA booking monitor - v3 (OCR Automated CAPTCHA)
-
-Flow
-  1. Load https://broneering.mfa.ee/en/ and pick the representation (default: New Delhi).
-  2. If the service dropdown is populated -> slots exist -> Telegram alert.
-  3. If AUTOFILL=1 -> select D-visa, pre-fill personal details, pick first free date/time,
-     solve CAPTCHAs automatically via local OCR (OpenCV + Tesseract), and complete booking.
-
-All personal data comes from environment variables / GitHub Secrets. Nothing is hard-coded.
+Estonian MFA booking monitor - v4 (OCR Automated with Precise Selectors)
 """
 import os, re, sys, time, requests
 import cv2
@@ -20,13 +12,13 @@ TOKEN = os.environ["TG_TOKEN"]
 CHAT_IDS = [c.strip() for c in os.environ["TG_CHAT_ID"].split(",") if c.strip()]
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
 AUTOFILL = os.environ.get("AUTOFILL", "0") == "1"
-DRY_RUN = os.environ.get("DRY_RUN") == "1"     # rehearsal: fill everything, stop before final CAPTCHA
+DRY_RUN = os.environ.get("DRY_RUN") == "1"
 CITY = os.environ.get("CITY", "New Delhi")
 SERVICE_MATCH = os.environ.get("SERVICE_MATCH", "Long-stay")
 NOTE_TEXT = os.environ.get("NOTE_TEXT", "Long-stay visa (D-visa) application")
-LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "0"))        # 0 = single check
-INTERVAL = int(os.environ.get("INTERVAL_SECONDS", "60"))       # seconds between checks
-REALERT = int(os.environ.get("REALERT_SECONDS", "900"))        # reminder while slots stay open
+LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "0"))
+INTERVAL = int(os.environ.get("INTERVAL_SECONDS", "60"))
+REALERT = int(os.environ.get("REALERT_SECONDS", "900"))
 URL = "https://broneering.mfa.ee/en/"
 API = f"https://api.telegram.org/bot{TOKEN}"
 OUT = "debug"
@@ -35,8 +27,8 @@ os.makedirs(OUT, exist_ok=True)
 PROFILE = {
     "first name": os.environ.get("FIRST_NAME", ""),
     "surname": os.environ.get("SURNAME", ""),
-    "date of birth": os.environ.get("DOB", ""),            # e.g. 15.02.1987
-    "phone": os.environ.get("PHONE", ""),                  # e.g. +917981013055
+    "date of birth": os.environ.get("DOB", ""),
+    "phone": os.environ.get("PHONE", ""),
     "e-mail": os.environ.get("EMAIL", ""),
     "visa application number": os.environ.get("VISA_APP_NO", ""),
 }
@@ -90,7 +82,7 @@ def get_services(page, city):
         return None
     sel.select_option(label=label)
     services = []
-    for _ in range(10):                       # service list is loaded via AJAX
+    for _ in range(10):
         page.wait_for_timeout(1000)
         opts = [o.strip() for o in page.locator("#broneering_toiming option").all_inner_texts()]
         services = [o for o in opts if o]
@@ -100,39 +92,47 @@ def get_services(page, city):
 
 
 def fill_field(page, key, value):
-    """Find an input by its visible label text; fall back to the next input after the label."""
+    """Precise field lookup based on exact UI labels seen in screenshots."""
     pat = re.compile(key, re.I)
     loc = page.get_by_label(pat)
+    
+    # Fallbacks matching exact labels like "Insert your first name *"
+    if loc.count() == 0:
+        loc = page.get_by_label(re.compile(f"insert your.*{key}", re.I))
     if loc.count() == 0:
         loc = page.locator(
             f"xpath=//label[contains(translate(normalize-space(.),"
             f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{key.lower()}')]"
             f"/following::input[1]")
+            
     if loc.count() == 0:
         raise RuntimeError(f"field not found: {key}")
+        
     el = loc.first
     el.click()
     el.fill(value)
     if "birth" in key:
-        page.keyboard.press("Escape")           # close datepicker popup
+        page.keyboard.press("Escape")
 
 
 def captcha_input(page):
     loc = page.get_by_label(re.compile("following code", re.I))
     if loc.count() == 0:
         loc = page.locator("input[name*='captcha' i], input[id*='captcha' i]")
+    if loc.count() == 0:
+        # Fallback to the input box located right below the captcha image block
+        loc = page.locator(".captcha-row input, tr:has(img[src*='captcha']) input, table input[type='text']").last
     return loc.first
 
 
 def captcha_image(page):
     loc = page.locator("img[src*='captcha' i], img[id*='captcha' i], img[alt*='captcha' i]")
-    if loc.count() == 0:   # fall back: nearest image before the captcha input
+    if loc.count() == 0:
         loc = captcha_input(page).locator("xpath=preceding::img[1]")
     return loc.first
 
 
 def solve_captcha_with_ocr(page, stage):
-    """Automatically capture CAPTCHA, clean noise via OpenCV, extract text via Tesseract, and fill it."""
     for attempt in range(3):
         try:
             page.wait_for_timeout(1000)
@@ -140,26 +140,22 @@ def solve_captcha_with_ocr(page, stage):
             captcha_path = f"{OUT}/captcha_{stage}.png"
             img_el.screenshot(path=captcha_path)
 
-            # Preprocess image with OpenCV
             img = cv2.imread(captcha_path)
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            # Thresholding to binarize text and eliminate background lines
             _, thresh = cv2.threshold(gray, 140, 255, cv2.THRESH_BINARY_INV)
             
             processed_path = f"{OUT}/processed_{stage}.png"
             cv2.imwrite(processed_path, thresh)
 
-            # Run Tesseract OCR (alphanumeric whitelist configuration)
             custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz0123456789'
             captcha_text = pytesseract.image_to_string(Image.open(processed_path), config=custom_config).strip()
             
             print(f"[{stage}] OCR Attempt {attempt + 1} detected text: '{captcha_text}'")
 
-            if len(captcha_text) >= 4:  # typical length check
+            if len(captcha_text) >= 4:
                 captcha_input(page).fill(captcha_text)
                 return True
             else:
-                # Refresh captcha if OCR output looks invalid/empty
                 refresh_btn = page.get_by_role("button", name=re.compile("Uuenda|refresh|reload", re.I))
                 if refresh_btn.count() > 0:
                     refresh_btn.first.click()
@@ -191,7 +187,7 @@ def pick_first_slot(page):
             days.first.click()
             break
     else:
-        raise RuntimeError("no selectable calendar day found (selectors need tuning, see debug/)")
+        raise RuntimeError("no selectable calendar day found")
     page.wait_for_timeout(1500)
     times = page.locator("input[type=checkbox]:not([disabled]):not(:checked)")
     if times.count() == 0:
@@ -202,21 +198,18 @@ def pick_first_slot(page):
 def autofill_flow(page, service_label):
     page.locator("#broneering_toiming").select_option(label=service_label)
 
-    # page 1 -> captcha -> next
     if not solve_captcha_with_ocr(page, "page1"):
         return False
     click_next(page, "next page")
 
-    # page 2 -> personal details
     snap(page, "page2")
     for key, val in PROFILE.items():
         if not val:
             raise RuntimeError(f"missing env value for '{key}'")
         fill_field(page, key, val)
-    send_photo(page.screenshot(full_page=True), "Page 2 as filled by script (OCR automated)")
+    send_photo(page.screenshot(full_page=True), "Page 2 filled by script (OCR)")
     click_next(page, "next page")
 
-    # page 3 -> date, time, note, captcha, book
     snap(page, "page3")
     pick_first_slot(page)
     note = page.get_by_label(re.compile("specifying information", re.I))
@@ -225,7 +218,7 @@ def autofill_flow(page, service_label):
     note.first.fill(NOTE_TEXT[:250])
     send_photo(page.screenshot(full_page=True), "Page 3: date, time and note chosen")
     if DRY_RUN:
-        notify("REHEARSAL OK: all steps worked with OCR. Stopped BEFORE final CAPTCHA - nothing booked.")
+        notify("REHEARSAL OK: all steps worked with OCR. Stopped BEFORE final CAPTCHA.")
         return True
     if not solve_captcha_with_ocr(page, "final"):
         return False
@@ -233,7 +226,7 @@ def autofill_flow(page, service_label):
     click_next(page, "book the appointment")
     snap(page, "result")
     body = page.inner_text("body")[:600].replace("\n", " ")
-    notify(f"Booking submitted automatically via OCR! Page says: {body}\nCheck your e-mail.")
+    notify(f"Booking submitted automatically via OCR! Page says: {body}")
     return True
 
 
@@ -268,8 +261,6 @@ def main():
                     load_fails += 1
                     print("site did not load, fail count", load_fails)
                     snap(page, "load_failed")
-                    if load_fails == 10:
-                        notify("Monitor warning: site has not loaded for 10 checks in a row.")
                 else:
                     load_fails = 0
                     services = get_services(page, CITY)
@@ -300,7 +291,7 @@ def main():
                                         snap(page, "autofill_error")
                                         notify(f"Auto-fill error: {e}\nBook manually: {URL}")
                     else:
-                        last_key = None         # slots gone -> next appearance alerts again
+                        last_key = None
                         if DRY_RUN:
                             notify(f"REHEARSAL: no services open for {CITY} right now.")
             except Exception as e:
