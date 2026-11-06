@@ -17,7 +17,7 @@ on:
 
 concurrency:
   group: check-slots
-  cancel-in-progress: false         # one run at a time; the next one waits in the queue
+  cancel-in-progress: false          # one run at a time; the next one waits in the queue
 
 permissions:
   contents: read
@@ -25,8 +25,6 @@ permissions:
 
 jobs:
   check:
-    # Manual runs always work. Scheduled restarts and self-chaining need the repo
-    # variable MONITOR_ENABLED = true (Settings > Secrets and variables > Actions > Variables).
     if: github.event_name == 'workflow_dispatch' || vars.MONITOR_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 355            # GitHub hard limit is 360
@@ -38,7 +36,12 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - run: pip install playwright requests
+      - name: Install System Dependencies (Tesseract OCR)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+
+      - run: pip install playwright requests opencv-python-headless pytesseract pillow
       - run: playwright install --with-deps chromium
 
       - name: Monitor loop
@@ -51,7 +54,6 @@ jobs:
           CITY: ${{ github.event.inputs.city || 'New Delhi' }}
           SERVICE_MATCH: "Long-stay"
           AUTOFILL: ${{ github.event.inputs.rehearsal == '1' && '1' || secrets.AUTOFILL }}
-          CAPTCHA_WAIT_SECONDS: "200"
           LOOP_SECONDS: ${{ github.event.inputs.rehearsal == '1' && '0' || '19800' }}
           INTERVAL_SECONDS: "60"
           REALERT_SECONDS: "900"
