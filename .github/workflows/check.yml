@@ -25,6 +25,9 @@ permissions:
 
 jobs:
   check:
+    # Manual runs always work. Scheduled restarts and self-chaining need the repo
+    # variable MONITOR_ENABLED = true (Settings > Secrets and variables > Actions > Variables).
+    if: github.event_name == 'workflow_dispatch' || vars.MONITOR_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 355            # GitHub hard limit is 360
     steps:
@@ -68,7 +71,7 @@ jobs:
           retention-days: 3
 
       - name: Start next run (self-chain)
-        if: always() && github.event.inputs.test != '1' && github.event.inputs.rehearsal != '1' && hashFiles('debug/booked.flag') == ''
+        if: (success() || failure()) && vars.MONITOR_ENABLED == 'true' && github.event.inputs.test != '1' && github.event.inputs.rehearsal != '1' && hashFiles('debug/booked.flag') == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
