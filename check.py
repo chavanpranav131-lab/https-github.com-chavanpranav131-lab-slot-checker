@@ -1,5 +1,5 @@
 """
-Estonian MFA booking monitor  -  v1 (locked spec)
+Estonian MFA booking monitor  -  v2 (loop + self-chaining)
 
 Flow
   1. Load https://broneering.mfa.ee/en/ and pick the representation (default: New Delhi).
@@ -21,6 +21,9 @@ CITY = os.environ.get("CITY", "New Delhi")
 SERVICE_MATCH = os.environ.get("SERVICE_MATCH", "Long-stay")
 CAPTCHA_WAIT = int(os.environ.get("CAPTCHA_WAIT_SECONDS", "200"))
 NOTE_TEXT = os.environ.get("NOTE_TEXT", "Long-stay visa (D-visa) application")
+LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "0"))        # 0 = single check
+INTERVAL = int(os.environ.get("INTERVAL_SECONDS", "60"))       # seconds between checks
+REALERT = int(os.environ.get("REALERT_SECONDS", "900"))        # reminder while slots stay open
 URL = "https://broneering.mfa.ee/en/"
 API = f"https://api.telegram.org/bot{TOKEN}"
 OUT = "debug"
@@ -235,53 +238,80 @@ def autofill_flow(page, service_label):
 
 
 # ---------- main ----------
+def load_page(page):
+    for attempt in range(3):
+        try:
+            page.goto(URL, wait_until="domcontentloaded", timeout=40000)
+            page.wait_for_selector("#broneering_esindus", timeout=30000)
+            return True
+        except Exception as e:
+            print(f"Load attempt {attempt + 1} failed:", e)
+            page.wait_for_timeout(3000)
+    return False
+
+
 def main():
     if TEST_MODE:
         notify("TEST: the bot can post here.")
+
+    start = time.time()
+    last_key, last_alert, load_fails, booked = None, 0.0, 0, False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 1600})
 
-        loaded = False
-        for attempt in range(3):
+        while True:
+            t0 = time.time()
             try:
-                page.goto(URL, wait_until="domcontentloaded", timeout=40000)
-                page.wait_for_selector("#broneering_esindus", timeout=30000)
-                loaded = True
-                break
-            except Exception as e:
-                print(f"Attempt {attempt + 1} failed:", e)
-                page.wait_for_timeout(5000)
-
-        if not loaded:
-            snap(page, "load_failed")
-            if TEST_MODE:
-                notify("TEST: site did not load.")
-            browser.close()
-            sys.exit(1)
-
-        services = get_services(page, CITY)
-        print(f"{CITY} services:", services)
-
-        if TEST_MODE:
-            notify(f"TEST: {CITY} services right now: {services or 'none'}")
-        elif services:
-            notify(f"Estonia {CITY}: booking options appeared: " + ", ".join(services)
-                   + f"\nBook now: {URL}")
-
-            if AUTOFILL:
-                match = next((s for s in services if SERVICE_MATCH.lower() in s.lower()), None)
-                if not match:
-                    notify(f"Slots exist but none match '{SERVICE_MATCH}'. Not auto-filling.")
+                if not load_page(page):
+                    load_fails += 1
+                    print("site did not load, fail count", load_fails)
+                    snap(page, "load_failed")
+                    if load_fails == 10:
+                        notify("Monitor warning: site has not loaded for 10 checks in a row.")
                 else:
-                    try:
-                        ok = autofill_flow(page, match)
-                        if not ok:
-                            notify("Auto-fill stopped (CAPTCHA not answered). Book manually.")
-                    except Exception as e:
-                        snap(page, "autofill_error")
-                        notify(f"Auto-fill error: {e}\nBook manually: {URL}")
+                    load_fails = 0
+                    services = get_services(page, CITY)
+                    stamp = time.strftime("%H:%M:%S")
+                    print(f"[{stamp}] {CITY} services:", services)
+
+                    if TEST_MODE:
+                        notify(f"TEST: {CITY} services right now: {services or 'none'}")
+                    elif services:
+                        key = tuple(sorted(services))
+                        if key != last_key or time.time() - last_alert > REALERT:
+                            notify(f"Estonia {CITY}: booking options appeared: "
+                                   + ", ".join(services) + f"\nBook now: {URL}")
+                            last_key, last_alert = key, time.time()
+                            if AUTOFILL:
+                                match = next((s for s in services
+                                              if SERVICE_MATCH.lower() in s.lower()), None)
+                                if not match:
+                                    notify(f"Slots exist but none match '{SERVICE_MATCH}'.")
+                                else:
+                                    try:
+                                        if autofill_flow(page, match):
+                                            booked = True
+                                            open(f"{OUT}/booked.flag", "w").write("1")
+                                        else:
+                                            notify("Auto-fill stopped (CAPTCHA not answered). "
+                                                   "Book manually.")
+                                    except Exception as e:
+                                        snap(page, "autofill_error")
+                                        notify(f"Auto-fill error: {e}\nBook manually: {URL}")
+                    else:
+                        last_key = None          # slots gone -> next appearance alerts again
+            except Exception as e:
+                print("Check error:", e)
+                snap(page, "check_error")
+
+            if booked or TEST_MODE or LOOP_SECONDS <= 0:
+                break
+            if time.time() - start + INTERVAL > LOOP_SECONDS:
+                break
+            time.sleep(max(1, INTERVAL - (time.time() - t0)))
+
         browser.close()
 
     if telegram_failed:
