@@ -2,7 +2,8 @@ name: check-slots
 
 on:
   schedule:
-    - cron: "*/5 * * * *"          # backup restart only; GitHub may delay or skip these
+    - cron: "*/5 * * * *"
+
   workflow_dispatch:
     inputs:
       test:
@@ -17,17 +18,17 @@ on:
 
 concurrency:
   group: check-slots
-  cancel-in-progress: false          # one run at a time; the next one waits in the queue
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  actions: write                    # lets a run start its successor
+  actions: write
 
 jobs:
   check:
     if: github.event_name == 'workflow_dispatch' || vars.MONITOR_ENABLED == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 355            # GitHub hard limit is 360
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +46,7 @@ jobs:
       - run: playwright install --with-deps chromium
 
       - name: Monitor loop
-        run: python -u check.py        # -u = unbuffered, so log lines appear live
+        run: python -u check.py
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
