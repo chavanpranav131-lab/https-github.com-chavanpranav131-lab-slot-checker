@@ -90,46 +90,23 @@ def fill_field(page, key, value):
     key_lower = key.lower()
     loc = None
 
-    # Direct explicit locators for each specific form field
-    if "first name" in key_lower:
-        loc = page.locator("input[name*='first' i], input[id*='first' i]").first
-        if loc.count() == 0:
-            loc = page.locator("xpath=//label[contains(., 'first name')]/following::input[1]")
-    elif "surname" in key_lower:
-        loc = page.locator("input[name*='surname' i], input[id*='surname' i], input[name*='last' i]").first
-        if loc.count() == 0:
-            loc = page.locator("xpath=//label[contains(., 'surname')]/following::input[1]")
-    elif "birth" in key_lower:
-        loc = page.locator("input[name*='birth' i], input[id*='birth' i]").first
-        if loc.count() == 0:
-            loc = page.locator("xpath=//label[contains(., 'date of birth')]/following::input[1]")
-    elif "phone" in key_lower:
-        loc = page.locator("input[name*='phone' i], input[id*='phone' i], input[type='tel']").first
-        if loc.count() == 0:
-            loc = page.locator("xpath=//label[contains(., 'phone')]/following::input[1]")
-    elif "e-mail" in key_lower or "email" in key_lower:
-        loc = page.locator("input[name*='mail' i], input[id*='mail' i], input[type='email']").first
-        if loc.count() == 0:
-            loc = page.locator("xpath=//label[contains(., 'e-mail') or contains(., 'email')]/following::input[1]")
-    elif "visa" in key_lower:
-        loc = page.locator("input[name*='visa' i], input[id*='visa' i], input[name*='app' i]").first
-        if loc.count() == 0:
-            loc = page.locator("xpath=//label[contains(., 'visa application number')]/following::input[1]")
+    # Primary Strategy: Positional mapping is 100% reliable for Page 2's static 6-field layout
+    inputs = page.locator("input[type='text'], input[type='email'], input[type='tel'], input:not([type])")
+    mapping = {
+        "first name": 0,
+        "surname": 1,
+        "date of birth": 2,
+        "phone": 3,
+        "e-mail": 4,
+        "visa application number": 5
+    }
+    idx = mapping.get(key_lower, -1)
+    if idx >= 0 and inputs.count() > idx:
+        loc = inputs.nth(idx)
 
-    # Fallback to absolute positional indexing of text inputs on Page 2
+    # Fallback Strategy: XPath label matching
     if not loc or loc.count() == 0:
-        inputs = page.locator("input[type='text'], input[type='email'], input[type='tel'], input:not([type])")
-        mapping = {
-            "first name": 0,
-            "surname": 1,
-            "date of birth": 2,
-            "phone": 3,
-            "e-mail": 4,
-            "visa application number": 5
-        }
-        idx = mapping.get(key_lower, -1)
-        if idx >= 0 and inputs.count() > idx:
-            loc = inputs.nth(idx)
+        loc = page.locator(f"xpath=//label[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{key_lower}')]/following::input[1]")
 
     if not loc or loc.count() == 0:
         raise RuntimeError(f"field not found: {key}")
