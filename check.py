@@ -1,5 +1,5 @@
 """
-Estonian MFA booking monitor - Fully Automated (OCR + Direct Booking)
+Estonian MFA booking monitor - v5 (OCR Automated with Page Verification & Error Screenshots)
 """
 import os, re, sys, time, requests
 import cv2
@@ -90,7 +90,6 @@ def fill_field(page, key, value):
     key_lower = key.lower()
     loc = None
 
-    # Primary Strategy: Positional mapping is 100% reliable for Page 2's static 6-field layout
     inputs = page.locator("input[type='text'], input[type='email'], input[type='tel'], input:not([type])")
     mapping = {
         "first name": 0,
@@ -104,7 +103,6 @@ def fill_field(page, key, value):
     if idx >= 0 and inputs.count() > idx:
         loc = inputs.nth(idx)
 
-    # Fallback Strategy: XPath label matching
     if not loc or loc.count() == 0:
         loc = page.locator(f"xpath=//label[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{key_lower}')]/following::input[1]")
 
@@ -136,37 +134,33 @@ def captcha_image(page):
 
 
 def solve_captcha_with_ocr(page, stage):
-    for attempt in range(3):
-        try:
-            page.wait_for_timeout(1000)
-            img_el = captcha_image(page)
-            captcha_path = f"{OUT}/captcha_{stage}.png"
-            img_el.screenshot(path=captcha_path)
+    try:
+        page.wait_for_timeout(1000)
+        img_el = captcha_image(page)
+        captcha_path = f"{OUT}/captcha_{stage}.png"
+        img_el.screenshot(path=captcha_path)
 
-            img = cv2.imread(captcha_path)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(gray, 140, 255, cv2.THRESH_BINARY_INV)
-            
-            processed_path = f"{OUT}/processed_{stage}.png"
-            cv2.imwrite(processed_path, thresh)
+        img = cv2.imread(captcha_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 140, 255, cv2.THRESH_BINARY_INV)
+        
+        processed_path = f"{OUT}/processed_{stage}.png"
+        cv2.imwrite(processed_path, thresh)
 
-            custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz0123456789'
-            captcha_text = pytesseract.image_to_string(Image.open(processed_path), config=custom_config).strip()
-            
-            print(f"[{stage}] OCR Attempt {attempt + 1} detected text: '{captcha_text}'")
+        custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz0123456789'
+        captcha_text = pytesseract.image_to_string(Image.open(processed_path), config=custom_config).strip()
+        
+        print(f"[{stage}] OCR detected text: '{captcha_text}'")
 
-            if len(captcha_text) >= 4:
-                captcha_input(page).fill(captcha_text)
-                return True
-            else:
-                refresh_btn = page.get_by_role("button", name=re.compile("Uuenda|refresh|reload", re.I))
-                if refresh_btn.count() > 0:
-                    refresh_btn.first.click()
-        except Exception as e:
-            print(f"OCR error on {stage}: {e}")
-            page.wait_for_timeout(1000)
-
-    notify(f"OCR failed to solve CAPTCHA for '{stage}' after 3 attempts.")
+        if len(captcha_text) >= 3:
+            captcha_input(page).fill(captcha_text)
+            return True
+        else:
+            refresh_btn = page.get_by_role("button", name=re.compile("Uuenda|refresh|reload", re.I))
+            if refresh_btn.count() > 0:
+                refresh_btn.first.click()
+    except Exception as e:
+        print(f"OCR error on {stage}: {e}")
     return False
 
 
@@ -201,18 +195,53 @@ def pick_first_slot(page):
 def autofill_flow(page, service_label):
     page.locator("#broneering_toiming").select_option(label=service_label)
 
-    if not solve_captcha_with_ocr(page, "page1"):
+    # Page 1 -> OCR CAPTCHA -> Next -> Verify Page 2 advance (up to 3 tries)
+    success = False
+    for attempt in range(1, 4):
+        print(f"Page 1 CAPTCHA attempt {attempt}/3")
+        if not solve_captcha_with_ocr(page, f"page1_attempt_{attempt}"):
+            continue
+        
+        click_next(page, "next page")
+        page.wait_for_timeout(2000)
+
+        # Verify page advanced to page 2 (checking for inputs)
+        is_page2 = page.locator("input[type='text'], input[type='email'], input[type='tel'], input:not([type])").count() >= 3
+        if is_page2:
+            success = True
+            break
+        else:
+            print(f"Page 1 CAPTCHA rejected or didn't advance (attempt {attempt}).")
+            snap(page, f"page1_failed_attempt_{attempt}")
+            try:
+                with open(f"{OUT}/page1_failed_attempt_{attempt}.png", "rb") as f:
+                    send_photo(f.read(), f"Page 1 CAPTCHA rejected / page did not advance (attempt {attempt}/3). Retrying.")
+            except Exception:
+                pass
+
+    if not success:
+        notify("Auto-fill failed: Page 1 CAPTCHA rejected after 3 attempts.")
         return False
-    click_next(page, "next page")
 
-    snap(page, "page2")
-    for key, val in PROFILE.items():
-        if not val:
-            raise RuntimeError(f"missing env value for '{key}'")
-        fill_field(page, key, val)
-    send_photo(page.screenshot(full_page=True), "Page 2 filled by script (OCR)")
-    click_next(page, "next page")
+    # Page 2 -> Personal details
+    try:
+        snap(page, "page2")
+        for key, val in PROFILE.items():
+            if not val:
+                raise RuntimeError(f"missing env value for '{key}'")
+            fill_field(page, key, val)
+        send_photo(page.screenshot(full_page=True), "Page 2 filled by script (OCR)")
+        click_next(page, "next page")
+    except Exception as e:
+        snap(page, "page2_error")
+        try:
+            with open(f"{OUT}/page2_error.png", "rb") as f:
+                send_photo(f.read(), f"Page 2 Error: {e}")
+        except Exception:
+            pass
+        raise e
 
+    # Page 3 -> Date, time, note, captcha, book
     snap(page, "page3")
     pick_first_slot(page)
     note = page.get_by_label(re.compile("specifying information", re.I))
@@ -225,14 +254,36 @@ def autofill_flow(page, service_label):
         notify("REHEARSAL OK: all steps worked with OCR. Stopped BEFORE final CAPTCHA.")
         return True
 
-    if not solve_captcha_with_ocr(page, "final"):
+    # Final CAPTCHA loop (up to 3 tries)
+    success_final = False
+    for attempt in range(1, 4):
+        print(f"Final CAPTCHA attempt {attempt}/3")
+        if not solve_captcha_with_ocr(page, f"final_attempt_{attempt}"):
+            continue
+        
+        snap(page, "before_submit")
+        click_next(page, "book the appointment")
+        page.wait_for_timeout(2000)
+
+        body_text = page.inner_text("body").lower()
+        if "booked" in body_text or "confirmation" in body_text or "success" in body_text:
+            success_final = True
+            break
+        else:
+            snap(page, f"final_failed_attempt_{attempt}")
+            try:
+                with open(f"{OUT}/final_failed_attempt_{attempt}.png", "rb") as f:
+                    send_photo(f.read(), f"Final CAPTCHA rejected / submission failed (attempt {attempt}/3). Retrying.")
+            except Exception:
+                pass
+
+    if not success_final:
+        notify("Auto-fill failed: Final booking CAPTCHA rejected after 3 attempts.")
         return False
-    
-    snap(page, "before_submit")
-    click_next(page, "book the appointment")
+
     snap(page, "result")
     body = page.inner_text("body")[:600].replace("\n", " ")
-    notify(f"SUCCESS! Booking submitted automatically via OCR. Page response: {body}\nCheck your email for confirmation.")
+    notify(f"Booking submitted automatically via OCR! Page says: {body}")
     return True
 
 
@@ -294,6 +345,11 @@ def main():
                                             notify("Auto-fill stopped (OCR failed). Book manually.")
                                     except Exception as e:
                                         snap(page, "autofill_error")
+                                        try:
+                                            with open(f"{OUT}/autofill_error.png", "rb") as f:
+                                                send_photo(f.read(), f"Auto-fill error: {e}")
+                                        except Exception:
+                                            pass
                                         notify(f"Auto-fill error: {e}\nBook manually: {URL}")
                     else:
                         last_key = None
