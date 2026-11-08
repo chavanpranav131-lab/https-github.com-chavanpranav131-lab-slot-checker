@@ -1,5 +1,5 @@
 """
-Estonian MFA booking monitor - v4 (OCR Automated with Precise Selectors)
+Estonian MFA booking monitor - Fully Automated (OCR + Direct Booking)
 """
 import os, re, sys, time, requests
 import cv2
@@ -7,7 +7,6 @@ import pytesseract
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
-# ---------- config ----------
 TOKEN = os.environ["TG_TOKEN"]
 CHAT_IDS = [c.strip() for c in os.environ["TG_CHAT_ID"].split(",") if c.strip()]
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
@@ -36,13 +35,11 @@ PROFILE = {
 telegram_failed = False
 
 
-# ---------- telegram ----------
 def notify(msg):
     global telegram_failed
     for cid in CHAT_IDS:
         try:
-            r = requests.post(f"{API}/sendMessage",
-                              data={"chat_id": cid, "text": msg[:4000]}, timeout=30)
+            r = requests.post(f"{API}/sendMessage", data={"chat_id": cid, "text": msg[:4000]}, timeout=30)
             if r.status_code != 200:
                 print("Telegram REJECTED:", r.json().get("description"))
                 telegram_failed = True
@@ -54,13 +51,11 @@ def notify(msg):
 def send_photo(data: bytes, caption: str):
     for cid in CHAT_IDS:
         try:
-            requests.post(f"{API}/sendPhoto", data={"chat_id": cid, "caption": caption[:1000]},
-                          files={"photo": ("img.png", data)}, timeout=60)
+            requests.post(f"{API}/sendPhoto", data={"chat_id": cid, "caption": caption[:1000]}, files={"photo": ("img.png", data)}, timeout=60)
         except Exception as e:
             print("sendPhoto error:", e)
 
 
-# ---------- page helpers ----------
 def snap(page, name):
     try:
         page.screenshot(path=f"{OUT}/{name}.png", full_page=True)
@@ -92,11 +87,9 @@ def get_services(page, city):
 
 
 def fill_field(page, key, value):
-    """Extremely robust field lookup using multiple fallback strategies including positional indexing."""
     key_lower = key.lower()
     loc = page.locator("none")
     
-    # Strategy 1: Playwright get_by_label
     try:
         loc = page.get_by_label(re.compile(key, re.I), exact=False)
         if loc.count() > 0:
@@ -104,12 +97,10 @@ def fill_field(page, key, value):
     except Exception:
         pass
 
-    # Strategy 2: Match label containing the keyword via XPath
     if loc.count() == 0 or not loc.is_visible():
         xpath = f"//label[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{key_lower}')]/following::input[1]"
         loc = page.locator(f"xpath={xpath}")
 
-    # Strategy 3: Match input name, id, or placeholder containing keyword parts
     if loc.count() == 0 or not loc.is_visible():
         parts = key_lower.split()
         for part in parts:
@@ -119,7 +110,6 @@ def fill_field(page, key, value):
                     loc = loc.first
                     break
 
-    # Strategy 4: Positional fallback matching Page 2's exact order of 6 text inputs
     if loc.count() == 0 or not loc.is_visible():
         inputs = page.locator("input[type='text'], input[type='email'], input[type='tel'], input:not([type])")
         mapping = {
@@ -150,7 +140,6 @@ def captcha_input(page):
     if loc.count() == 0:
         loc = page.locator("input[name*='captcha' i], input[id*='captcha' i]")
     if loc.count() == 0:
-        # Fallback to the input box located right below the captcha image block
         loc = page.locator(".captcha-row input, tr:has(img[src*='captcha']) input, table input[type='text']").last
     return loc.first
 
@@ -247,20 +236,22 @@ def autofill_flow(page, service_label):
         note = page.locator("textarea")
     note.first.fill(NOTE_TEXT[:250])
     send_photo(page.screenshot(full_page=True), "Page 3: date, time and note chosen")
+    
     if DRY_RUN:
         notify("REHEARSAL OK: all steps worked with OCR. Stopped BEFORE final CAPTCHA.")
         return True
+
     if not solve_captcha_with_ocr(page, "final"):
         return False
+    
     snap(page, "before_submit")
     click_next(page, "book the appointment")
     snap(page, "result")
     body = page.inner_text("body")[:600].replace("\n", " ")
-    notify(f"Booking submitted automatically via OCR! Page says: {body}")
+    notify(f"SUCCESS! Booking submitted automatically via OCR. Page response: {body}\nCheck your email for confirmation.")
     return True
 
 
-# ---------- main ----------
 def load_page(page):
     for attempt in range(3):
         try:
