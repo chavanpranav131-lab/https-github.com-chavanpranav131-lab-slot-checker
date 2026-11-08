@@ -88,29 +88,36 @@ def get_services(page, city):
 
 def fill_field(page, key, value):
     key_lower = key.lower()
-    loc = page.locator("none")
-    
-    try:
-        loc = page.get_by_label(re.compile(key, re.I), exact=False)
-        if loc.count() > 0:
-            loc = loc.first
-    except Exception:
-        pass
+    loc = None
 
-    if loc.count() == 0 or not loc.is_visible():
-        xpath = f"//label[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{key_lower}')]/following::input[1]"
-        loc = page.locator(f"xpath={xpath}")
+    # Direct explicit locators for each specific form field
+    if "first name" in key_lower:
+        loc = page.locator("input[name*='first' i], input[id*='first' i]").first
+        if loc.count() == 0:
+            loc = page.locator("xpath=//label[contains(., 'first name')]/following::input[1]")
+    elif "surname" in key_lower:
+        loc = page.locator("input[name*='surname' i], input[id*='surname' i], input[name*='last' i]").first
+        if loc.count() == 0:
+            loc = page.locator("xpath=//label[contains(., 'surname')]/following::input[1]")
+    elif "birth" in key_lower:
+        loc = page.locator("input[name*='birth' i], input[id*='birth' i]").first
+        if loc.count() == 0:
+            loc = page.locator("xpath=//label[contains(., 'date of birth')]/following::input[1]")
+    elif "phone" in key_lower:
+        loc = page.locator("input[name*='phone' i], input[id*='phone' i], input[type='tel']").first
+        if loc.count() == 0:
+            loc = page.locator("xpath=//label[contains(., 'phone')]/following::input[1]")
+    elif "e-mail" in key_lower or "email" in key_lower:
+        loc = page.locator("input[name*='mail' i], input[id*='mail' i], input[type='email']").first
+        if loc.count() == 0:
+            loc = page.locator("xpath=//label[contains(., 'e-mail') or contains(., 'email')]/following::input[1]")
+    elif "visa" in key_lower:
+        loc = page.locator("input[name*='visa' i], input[id*='visa' i], input[name*='app' i]").first
+        if loc.count() == 0:
+            loc = page.locator("xpath=//label[contains(., 'visa application number')]/following::input[1]")
 
-    if loc.count() == 0 or not loc.is_visible():
-        parts = key_lower.split()
-        for part in parts:
-            if len(part) > 2:
-                loc = page.locator(f"input[name*='{part}' i], input[id*='{part}' i], input[placeholder*='{part}' i]")
-                if loc.count() > 0:
-                    loc = loc.first
-                    break
-
-    if loc.count() == 0 or not loc.is_visible():
+    # Fallback to absolute positional indexing of text inputs on Page 2
+    if not loc or loc.count() == 0:
         inputs = page.locator("input[type='text'], input[type='email'], input[type='tel'], input:not([type])")
         mapping = {
             "first name": 0,
@@ -124,7 +131,7 @@ def fill_field(page, key, value):
         if idx >= 0 and inputs.count() > idx:
             loc = inputs.nth(idx)
 
-    if loc.count() == 0:
+    if not loc or loc.count() == 0:
         raise RuntimeError(f"field not found: {key}")
 
     el = loc.first
